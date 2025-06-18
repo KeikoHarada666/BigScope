@@ -1,5 +1,8 @@
 use eframe::egui;
 use rfd::FileDialog;
+use sqlparser::ast::{Expr, SetExpr, Statement, Value, Values};
+use sqlparser::dialect::GenericDialect;
+use sqlparser::parser::Parser;
 use std::fs;
 use std::path::PathBuf;
 
@@ -29,7 +32,9 @@ impl eframe::App for MyApp {
                 if let Some(path) = FileDialog::new().add_filter("SQL", &["sql"]).pick_file() {
                     self.selected_file = Some(path.clone());
                     if let Ok(content) = fs::read_to_string(&path) {
-                        self.parse_sql_to_table(&content);
+                        if let Err(err) = self.parse_sql_to_table(&content) {
+                            eprintln!("Failed to parse SQL: {err}");
+                        }
                     }
                 }
             }
@@ -43,9 +48,10 @@ impl eframe::App for MyApp {
                 ui.label("Представление как таблицы:");
 
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    egui::Grid::new("table_grid")
-                        .striped(true)
-                        .show(ui, |ui| {
+                    egui::ScrollArea::horizontal().show(ui, |ui| {
+                        egui::Grid::new("table_grid")
+                            .striped(true)
+                            .show(ui, |ui| {
                             // Заголовки
                             for col in &self.columns {
                                 ui.label(egui::RichText::new(col).strong());
@@ -60,6 +66,7 @@ impl eframe::App for MyApp {
                                 ui.end_row();
                             }
                         });
+                    });
                 });
             }
         });
@@ -67,28 +74,27 @@ impl eframe::App for MyApp {
 }
 
 impl MyApp {
-    fn parse_sql_to_table(&mut self, sql: &str) {
+    fn parse_sql_to_table(&mut self, sql: &str) -> Result<(), Box<dyn std::error::Error>> {
         self.table_data.clear();
         self.columns.clear();
 
-        for line in sql.lines() {
-            if line.trim_start().starts_with("INSERT INTO") {
-                // Пример: INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30), ...
-                let cols_start = line.find('(').unwrap_or(0);
-                let cols_end = line.find(')').unwrap_or(cols_start);
-                let cols = &line[cols_start + 1..cols_end];
-                self.columns = cols.split(',').map(|s| s.trim().to_string()).collect();
+        let dialect = GenericDialect {};
+        let statements = Parser::parse_sql(&dialect, sql)?;
 
-                if let Some(values_start) = line.find("VALUES") {
-                    let values_str = &line[values_start + 6..].replace("),", ")|"); // Разделяем записи
-                    let rows: Vec<&str> = values_str.split('|').collect();
+        for stmt in statements {
+            if let Statement::Insert { columns, source, .. } = stmt {
+                self.columns = columns.iter().map(|c| c.value.clone()).collect();
 
+                if let SetExpr::Values(Values { rows, .. }) = *source.body {
                     for row in rows {
-                        let row = row.trim().trim_matches(';').trim_matches('(').trim_matches(')');
-                        let cells = row
-                            .split(',')
-                            .map(|s| s.trim().trim_matches('\'').to_string())
-                            .collect::<Vec<String>>();
+                        let mut cells = Vec::new();
+                        for expr in row {
+                            match expr {
+                                Expr::Value(Value::SingleQuotedString(s)) => cells.push(s),
+                                Expr::Value(v) => cells.push(v.to_string()),
+                                _ => cells.push(expr.to_string()),
+                            }
+                        }
                         if !cells.is_empty() {
                             self.table_data.push(cells);
                         }
@@ -96,5 +102,23 @@ impl MyApp {
                 }
             }
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_simple_insert() {
+        let sql = "INSERT INTO users (id, name) VALUES (1, 'Alice'), (2, 'Bob');";
+        let mut app = MyApp::default();
+        app.parse_sql_to_table(sql).unwrap();
+        assert_eq!(app.columns, vec!["id".to_string(), "name".to_string()]);
+        assert_eq!(app.table_data, vec![
+            vec!["1".to_string(), "Alice".to_string()],
+            vec!["2".to_string(), "Bob".to_string()],
+        ]);
     }
 }
