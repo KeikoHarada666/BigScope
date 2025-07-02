@@ -1,5 +1,3 @@
-// Приложение Rust с eframe/egui, rfd и rusqlite для выполнения SQL в SQLite и отображения таблиц
-
 use eframe::{egui, App};
 use rfd::FileDialog;
 use rusqlite::{Connection, Result};
